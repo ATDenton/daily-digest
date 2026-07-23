@@ -83,7 +83,59 @@
     font-size: 0.78rem;
     margin-top: 2px;
   }
+  .bias-tag {
+    display: inline-block;
+    font-size: 0.68rem;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 10px;
+    margin-left: 6px;
+    letter-spacing: .01em;
+  }
+  .bias-center { background: rgba(107,114,128,.18); color: var(--muted); }
+  .bias-leanleft { background: rgba(45,110,255,.15); color: #3b6fe0; }
+  .bias-leanright { background: rgba(220,60,60,.15); color: #c1121f; }
+  @media (prefers-color-scheme: dark) {
+    .bias-leanleft { color: #8fb2ff; }
+    .bias-leanright { color: #ff8f8f; }
+  }
+  .story-card { margin-bottom: 10px; }
+  .story-headline {
+    font-weight: 600;
+    font-size: 0.95rem;
+    margin: 0 0 4px;
+  }
+  .story-count {
+    color: var(--muted);
+    font-weight: 500;
+    font-size: 0.78rem;
+    margin-left: 6px;
+  }
+  .story-sources {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .story-sources li {
+    padding: 4px 0 4px 12px;
+    border-left: 2px solid var(--border);
+    margin-top: 2px;
+  }
+  .story-sources a {
+    color: var(--text);
+    text-decoration: none;
+    font-size: 0.85rem;
+  }
+  .story-sources a:hover { color: var(--accent); }
+  .other-headlines-label {
+    color: var(--muted);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    margin: 14px 0 6px;
+  }
   footer { margin-top: 30px; color: var(--muted); font-size: 0.8rem; text-align: center; }
+  footer .legend { margin-top: 6px; }
 </style>
 </head>
 <body>
@@ -126,22 +178,45 @@
     </div>
   </div>
 
-  {% for section, items in news.items() %}
+  {% for section, data in sections.items() %}
   <h2 class="section-title">{{ section }}</h2>
   <div class="card">
-    <p class="commentary">{{ section_summaries.get(section, "") }}</p>
+    <p class="commentary">{{ data.summary }}</p>
+
+    {% if data.clusters %}
+      {% for cluster in data.clusters %}
+      <div class="story-card">
+        <p class="story-headline">{{ cluster.headline }}<span class="story-count">{{ cluster.sources|length }} sources</span></p>
+        <ul class="story-sources">
+          {% for item in cluster.sources %}
+          <li>
+            <a href="{{ item.link }}" target="_blank" rel="noopener">{{ item.source }}</a>
+            {% if item.bias %}<span class="bias-tag bias-{{ item.bias|lower|replace(' ', '') }}">{{ item.bias }}</span>{% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endfor %}
+    {% endif %}
+
+    {% if data.singles %}
+    {% if data.clusters %}<div class="other-headlines-label">Also reported</div>{% endif %}
     <ul class="headline-list">
-      {% for item in items %}
+      {% for item in data.singles %}
       <li>
         <a href="{{ item.link }}" target="_blank" rel="noopener">{{ item.title }}</a>
-        <span class="meta">{{ item.source }}</span>
+        <span class="meta">{{ item.source }}{% if item.bias %}<span class="bias-tag bias-{{ item.bias|lower|replace(' ', '') }}">{{ item.bias }}</span>{% endif %}</span>
       </li>
       {% endfor %}
     </ul>
+    {% endif %}
   </div>
   {% endfor %}
 
-  <footer>Generated automatically · sources linked above · not financial advice</footer>
+  <footer>
+    Generated automatically · sources linked above · not financial advice
+    <div class="legend">Bias tags are rough, per-publication editorial-lean labels for context (not a per-article rating).</div>
+  </footer>
 </div>
 </body>
 </html>
