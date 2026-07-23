@@ -1,0 +1,7 @@
+yfinance
+feedparser
+google-genai
+python-dotenv
+jinja2
+requests
+certifi
