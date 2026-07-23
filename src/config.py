@@ -9,6 +9,7 @@ INDICES = {
         ("^FTMC", "FTSE 250"),
     ],
     "World": [
+        ("VWRL.L", "FTSE All-World (Vanguard ETF)"),
         ("^GDAXI", "DAX (Germany)"),
         ("^FCHI", "CAC 40 (France)"),
         ("^N225", "Nikkei 225 (Japan)"),
