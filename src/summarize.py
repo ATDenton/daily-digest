@@ -1,12 +1,26 @@
 import json
 import os
+import random
+import time
 
 from dotenv import load_dotenv
 from google import genai
+from google.genai import errors
 
 load_dotenv()
 
-MODEL = "gemini-flash-latest"
+# Pinned deliberately rather than using a "-latest" alias: those get hot-swapped
+# with every new release and can point at preview builds, so an unattended job
+# can be migrated onto a different model without warning.
+MODEL = "gemini-3.7-flash"
+
+# The API returns transient 503s when a model is under load, and a single one
+# used to fail the whole digest. This is a once-a-day job with nobody watching,
+# so it's worth waiting out a spike. Backoff is ~4s, 8s, 16s, 32s between five
+# attempts - roughly a minute of total waiting in the worst case.
+MAX_ATTEMPTS = 5
+INITIAL_BACKOFF_SECONDS = 4
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 SYSTEM_INSTRUCTION = """You are writing a concise daily digest for one reader.
 Given raw market data and news headlines (with sources and ids), write short,
@@ -73,18 +87,50 @@ def _validate_clusters(digest_copy, news):
     return digest_copy
 
 
+def _is_retryable(exc):
+    """Transient server-side errors, plus the occasional truncated response."""
+    if isinstance(exc, errors.APIError):
+        return getattr(exc, "code", None) in RETRYABLE_STATUS_CODES
+    return isinstance(exc, json.JSONDecodeError)
+
+
+def _generate_copy(client, prompt):
+    return json.loads(
+        client.models.generate_content(
+            model=MODEL,
+            contents=prompt,
+            config={
+                "system_instruction": SYSTEM_INSTRUCTION,
+                "response_mime_type": "application/json",
+            },
+        ).text
+    )
+
+
 def generate_digest_copy(indices, watchlist, news):
     client = _client()
     prompt = _build_prompt(indices, watchlist, news)
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=prompt,
-        config={
-            "system_instruction": SYSTEM_INSTRUCTION,
-            "response_mime_type": "application/json",
-        },
-    )
-    digest_copy = json.loads(response.text)
+
+    backoff = INITIAL_BACKOFF_SECONDS
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            digest_copy = _generate_copy(client, prompt)
+            break
+        except Exception as exc:
+            if not _is_retryable(exc) or attempt == MAX_ATTEMPTS:
+                raise
+            # Jitter so retries don't line up with other clients backing off
+            # against the same overloaded model.
+            delay = backoff + random.uniform(0, 1)
+            print(
+                f"Gemini call failed ({type(exc).__name__}: {exc}); "
+                f"retrying in {delay:.1f}s "
+                f"(attempt {attempt} of {MAX_ATTEMPTS})",
+                flush=True,
+            )
+            time.sleep(delay)
+            backoff *= 2
+
     return _validate_clusters(digest_copy, news)
 
 
