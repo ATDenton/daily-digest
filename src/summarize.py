@@ -16,10 +16,13 @@ MODEL = "gemini-3.7-flash"
 
 # The API returns transient 503s when a model is under load, and a single one
 # used to fail the whole digest. This is a once-a-day job with nobody watching,
-# so it's worth waiting out a spike. Backoff is ~4s, 8s, 16s, 32s between five
-# attempts - roughly a minute of total waiting in the worst case.
-MAX_ATTEMPTS = 5
+# so it's worth waiting out a spike. Observed demand spikes have needed four
+# retries to get through, so the budget is deliberately generous: the backoff
+# is capped rather than doubling indefinitely, which buys more attempts (more
+# chances to hit a gap in the congestion) for a similar total wait of ~2.5min.
+MAX_ATTEMPTS = 8
 INITIAL_BACKOFF_SECONDS = 4
+MAX_BACKOFF_SECONDS = 30
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 SYSTEM_INSTRUCTION = """You are writing a concise daily digest for one reader.
@@ -129,7 +132,7 @@ def generate_digest_copy(indices, watchlist, news):
                 flush=True,
             )
             time.sleep(delay)
-            backoff *= 2
+            backoff = min(backoff * 2, MAX_BACKOFF_SECONDS)
 
     return _validate_clusters(digest_copy, news)
 
