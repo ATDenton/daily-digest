@@ -9,21 +9,37 @@ from google.genai import errors
 
 load_dotenv()
 
-# Pinned deliberately rather than using a "-latest" alias: those get hot-swapped
-# with every new release and can point at preview builds, so an unattended job
-# can be migrated onto a different model without warning.
-MODEL = "gemini-3.7-flash"
+# Tried in order of preference. Individual models pinned rather than using a
+# "-latest" alias: those get hot-swapped with every new release and can point at
+# preview builds, so an unattended job can be migrated without warning.
+#
+# The list deliberately spans both model generations and size tiers. A single
+# model can return 503 "high demand" continuously for minutes at a time - on
+# 2026-08-17 that hit gemini-3.7-flash and gemini-3.6-flash simultaneously for
+# over five minutes, long enough to exhaust any sensible retry budget, while
+# the older and lite-tier models stayed healthy throughout. Falling back across
+# tiers is what actually survives that, so the last two entries are lite models:
+# their copy is terser, but a shorter digest beats no digest.
+#
+# Every entry here was checked against the live API - note that models.list()
+# advertises some models (gemini-2.5-flash) that then 404 as "no longer
+# available to new users", so a name appearing there is not enough.
+MODELS = (
+    "gemini-3.7-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+)
 
-# The API returns transient 503s when a model is under load, and a single one
-# used to fail the whole digest. This is a once-a-day job with nobody watching,
-# so it's worth waiting out a spike. Observed demand spikes have needed four
-# retries to get through, so the budget is deliberately generous: the backoff
-# is capped rather than doubling indefinitely, which buys more attempts (more
-# chances to hit a gap in the congestion) for a similar total wait of ~2.5min.
-MAX_ATTEMPTS = 8
+# Each pass tries every model in turn with no delay in between, since these are
+# separate backends and a model that's saturated right now says nothing about
+# the next one. Only once a whole pass has failed is it worth backing off.
+MAX_PASSES = 6
 INITIAL_BACKOFF_SECONDS = 4
 MAX_BACKOFF_SECONDS = 30
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+# A model that's been retired or renamed should be stepped over, not retried.
+MODEL_UNAVAILABLE_STATUS_CODES = {404}
 
 SYSTEM_INSTRUCTION = """You are writing a concise daily digest for one reader.
 Given raw market data and news headlines (with sources and ids), write short,
@@ -90,17 +106,22 @@ def _validate_clusters(digest_copy, news):
     return digest_copy
 
 
-def _is_retryable(exc):
-    """Transient server-side errors, plus the occasional truncated response."""
+def _is_recoverable(exc):
+    """Whether it's worth trying another model, or the same one again later.
+
+    Anything else - a malformed prompt, a bad API key - would fail identically
+    on every model, so it should surface immediately rather than be retried.
+    """
     if isinstance(exc, errors.APIError):
-        return getattr(exc, "code", None) in RETRYABLE_STATUS_CODES
+        code = getattr(exc, "code", None)
+        return code in RETRYABLE_STATUS_CODES or code in MODEL_UNAVAILABLE_STATUS_CODES
     return isinstance(exc, json.JSONDecodeError)
 
 
-def _generate_copy(client, prompt):
+def _generate_copy(client, model, prompt):
     return json.loads(
         client.models.generate_content(
-            model=MODEL,
+            model=model,
             contents=prompt,
             config={
                 "system_instruction": SYSTEM_INSTRUCTION,
@@ -110,30 +131,39 @@ def _generate_copy(client, prompt):
     )
 
 
-def generate_digest_copy(indices, watchlist, news):
-    client = _client()
-    prompt = _build_prompt(indices, watchlist, news)
-
+def _generate_with_fallback(client, prompt):
     backoff = INITIAL_BACKOFF_SECONDS
-    for attempt in range(1, MAX_ATTEMPTS + 1):
-        try:
-            digest_copy = _generate_copy(client, prompt)
-            break
-        except Exception as exc:
-            if not _is_retryable(exc) or attempt == MAX_ATTEMPTS:
-                raise
+    last_exc = None
+
+    for pass_number in range(1, MAX_PASSES + 1):
+        for model in MODELS:
+            try:
+                return _generate_copy(client, model, prompt)
+            except Exception as exc:
+                if not _is_recoverable(exc):
+                    raise
+                last_exc = exc
+                print(
+                    f"{model} unavailable ({type(exc).__name__}: {exc}) "
+                    f"[pass {pass_number} of {MAX_PASSES}]",
+                    flush=True,
+                )
+
+        if pass_number < MAX_PASSES:
             # Jitter so retries don't line up with other clients backing off
-            # against the same overloaded model.
+            # against the same overloaded models.
             delay = backoff + random.uniform(0, 1)
-            print(
-                f"Gemini call failed ({type(exc).__name__}: {exc}); "
-                f"retrying in {delay:.1f}s "
-                f"(attempt {attempt} of {MAX_ATTEMPTS})",
-                flush=True,
-            )
+            print(f"All models unavailable; retrying in {delay:.1f}s", flush=True)
             time.sleep(delay)
             backoff = min(backoff * 2, MAX_BACKOFF_SECONDS)
 
+    raise last_exc
+
+
+def generate_digest_copy(indices, watchlist, news):
+    client = _client()
+    prompt = _build_prompt(indices, watchlist, news)
+    digest_copy = _generate_with_fallback(client, prompt)
     return _validate_clusters(digest_copy, news)
 
 
